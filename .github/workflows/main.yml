@@ -9,6 +9,25 @@ on:
       - README.md
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-node@v6
+      with:
+        node-version: 24
+    - uses: actions/setup-python@v6
+    - run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev libxtst-dev libxkbcommon-dev
+    - run: npm ci
+      working-directory: ./renderer
+    - run: npm ci
+      working-directory: ./main
+    - uses: pre-commit/action@v3.0.1
+    - run: npm run make-index-files
+      working-directory: ./renderer
+    - run: npm run test
+      working-directory: ./renderer
+
   renderer:
     runs-on: ubuntu-latest
     steps:
@@ -29,7 +48,7 @@ jobs:
         retention-days: 1
 
   package:
-    needs: renderer
+    needs: [test, renderer]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -51,15 +70,15 @@ jobs:
       working-directory: ./main
     - run: npx electron-builder build --linux AppImage --publish never
       working-directory: ./main
-    - name: Upload AppImage to release
+    - name: Create release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         VERSION=$(node -p "require('./main/package.json').version")
-        TAG="v${VERSION}-linux-test"
-        gh release delete "$TAG" --repo ${{ github.repository }} --yes 2>/dev/null || true
+        TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+        TAG="v${VERSION}-${TIMESTAMP}"
         gh release create "$TAG" ./main/dist/*.AppImage \
           --repo ${{ github.repository }} \
-          --title "Linux Test Build v${VERSION}" \
-          --notes "Automated Linux test build with patched electron-overlay-window" \
+          --title "v${VERSION} (${TIMESTAMP})" \
+          --notes "Linux AppImage with patched electron-overlay-window" \
           --prerelease
