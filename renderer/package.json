@@ -66,5 +66,10 @@
   },
   "browserslist": [
     "chrome >= 101"
-  ]
+  ],
+  "allowScripts": {
+    "vue-demi@0.14.10": true,
+    "esbuild@0.21.5": true,
+    "unrs-resolver@1.11.1": true
+  }
 }
