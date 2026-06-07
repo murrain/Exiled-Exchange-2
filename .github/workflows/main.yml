@@ -43,6 +43,8 @@ jobs:
         path: ./renderer/dist
     - run: npm ci
       working-directory: ./main
+    - run: npx @electron/rebuild -f -w electron-overlay-window
+      working-directory: ./main
     - run: npm run build
       working-directory: ./main
     - run: npx electron-builder build --linux AppImage --publish always
