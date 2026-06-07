@@ -27,6 +27,8 @@ export class Shortcuts {
   private logKeys = false;
   private areaTracker: WidgetAreaTracker;
   private clipboard: HostClipboard;
+  private lastMousePosition?: { x: number; y: number };
+  private linuxCopyLatchKey: string | null = null;
 
   static async create(
     logger: Logger,
@@ -55,7 +57,7 @@ export class Shortcuts {
     private server: ServerEvents,
     private ocrWorker: OcrWorker,
   ) {
-    this.areaTracker = new WidgetAreaTracker(server, overlay);
+    this.areaTracker = new WidgetAreaTracker(server, overlay, logger);
     this.clipboard = new HostClipboard(logger);
 
     this.poeWindow.on("active-change", (isActive) => {
@@ -73,21 +75,90 @@ export class Shortcuts {
     this.server.onEventAnyClient("CLIENT->MAIN::user-action", (e) => {
       if (e.action === "stash-search") {
         stashSearch(e.text, this.clipboard, this.overlay);
+      } else if (e.action === "debug-log") {
+        this.logger.write(`debug [Renderer] ${e.text}`);
+      } else if (e.action === "activate-overlay") {
+        this.overlay.refreshOverlayActive();
+      } else if (e.action === "price-check-clicked") {
+        this.areaTracker.confirmLinuxAreaClick();
       }
     });
 
     uIOhook.on("keydown", (e) => {
-      if (!this.logKeys) return;
-      const pressed = eventToString(e);
-      this.logger.write(`debug [Shortcuts] Keydown ${pressed}`);
+      if (this.logKeys) {
+        const pressed = eventToString(e);
+        this.logger.write(`debug [Shortcuts] Keydown ${pressed}`);
+      }
+
+      if (process.platform === "linux") {
+        const pressed = eventToString(e);
+        const copyItemAction = this.actions.find(
+          (entry) =>
+            entry.action.type === "copy-item" && entry.shortcut === pressed,
+        );
+        if (copyItemAction && this.poeWindow.isActive) {
+          if (this.linuxCopyLatchKey) return;
+          this.linuxCopyLatchKey = copyItemAction.shortcut;
+          this.executeAction(copyItemAction);
+          return;
+        }
+
+        // On Linux, uiohook handles overlay dismissal instead of
+        // before-input-event (which requires electronWindow.focus() —
+        // a non-starter for override-redirect windows on X11).
+        if (
+          pressed === this.overlay.overlayKey &&
+          (this.poeWindow.isActive ||
+            this.overlay.isInteractable ||
+            this.overlay.isAwaitingInputEnterReactivation)
+        ) {
+          this.logger.write(
+            `debug [Overlay] keyboard toggle: ${this.overlay.overlayKey}`,
+          );
+          this.areaTracker.removeListeners();
+          this.overlay.toggleActiveState();
+          return;
+        }
+
+        if (
+          !this.overlay.isInteractable &&
+          !this.overlay.isAwaitingInputEnterReactivation
+        ) {
+          return;
+        }
+
+        if (pressed === "Escape") {
+          this.logger.write("debug [Overlay] keyboard dismiss: Escape");
+          this.overlay.assertGameActive();
+        } else if (pressed === this.overlay.overlayKey) {
+          this.logger.write(
+            `debug [Overlay] keyboard dismiss: ${this.overlay.overlayKey}`,
+          );
+          this.overlay.assertGameActive();
+        }
+      }
+    });
+    uIOhook.on("mousemove", (e) => {
+      this.lastMousePosition = { x: e.x, y: e.y };
+    });
+    uIOhook.on("mousedown", (e) => {
+      this.lastMousePosition = { x: e.x, y: e.y };
     });
     uIOhook.on("keyup", (e) => {
-      if (!this.logKeys) return;
-      this.logger.write(
-        `debug [Shortcuts] Keyup ${
-          UiohookToName[e.keycode] || "not_supported_key"
-        }`,
-      );
+      const name = UiohookToName[e.keycode] || "not_supported_key";
+      if (this.logKeys) {
+        this.logger.write(`debug [Shortcuts] Keyup ${name}`);
+      }
+      // Clear the copy-item latch when the non-modifier key of the exact
+      // latched shortcut is released. This prevents auto-repeat from
+      // starting a second copy while the first is still in flight.
+      if (
+        process.platform === "linux" &&
+        this.linuxCopyLatchKey &&
+        this.linuxCopyLatchKey.endsWith(name)
+      ) {
+        this.linuxCopyLatchKey = null;
+      }
     });
 
     uIOhook.on("wheel", (e) => {
@@ -173,100 +244,15 @@ export class Shortcuts {
 
   private register() {
     for (const entry of this.actions) {
+      // On Linux, copy-item actions are handled via uiohook keydown to avoid
+      // the DIP/physical pixel race that affects globalShortcut + getCursorScreenPoint.
+      if (process.platform === "linux" && entry.action.type === "copy-item") {
+        continue;
+      }
+
       const isOk = globalShortcut.register(
         shortcutToElectron(entry.shortcut),
-        () => {
-          if (this.logKeys) {
-            this.logger.write(
-              `debug [Shortcuts] Action type: ${entry.action.type}`,
-            );
-          }
-
-          if (entry.keepModKeys) {
-            const nonModKey = entry.shortcut
-              .split(" + ")
-              .filter((key) => !isModKey(key))[0];
-            uIOhook.keyToggle(UiohookKey[nonModKey as UiohookKeyT], "up");
-          } else {
-            entry.shortcut
-              .split(" + ")
-              .reverse()
-              .forEach((key) => {
-                uIOhook.keyToggle(UiohookKey[key as UiohookKeyT], "up");
-              });
-          }
-
-          if (entry.action.type === "toggle-overlay") {
-            this.areaTracker.removeListeners();
-            this.overlay.toggleActiveState();
-          } else if (entry.action.type === "paste-in-chat") {
-            typeInChat(entry.action.text, entry.action.send, this.clipboard);
-          } else if (entry.action.type === "trigger-event") {
-            this.server.sendEventTo("broadcast", {
-              name: "MAIN->CLIENT::widget-action",
-              payload: { target: entry.action.target },
-            });
-          } else if (entry.action.type === "stash-search") {
-            stashSearch(entry.action.text, this.clipboard, this.overlay);
-          } else if (entry.action.type === "copy-item") {
-            const { action } = entry;
-
-            const pressPosition = screen.getCursorScreenPoint();
-
-            this.clipboard
-              .readItemText()
-              .then((clipboard) => {
-                this.areaTracker.removeListeners();
-                this.server.sendEventTo("last-active", {
-                  name: "MAIN->CLIENT::item-text",
-                  payload: {
-                    target: action.target,
-                    clipboard,
-                    position: pressPosition,
-                    focusOverlay: Boolean(action.focusOverlay),
-                  },
-                });
-                if (action.focusOverlay && this.overlay.wasUsedRecently) {
-                  this.overlay.assertOverlayActive();
-                }
-              })
-              .catch(() => {});
-
-            pressKeysToCopyItemText(
-              entry.keepModKeys
-                ? entry.shortcut.split(" + ").filter((key) => isModKey(key))
-                : undefined,
-              this.gameConfig.showModsKey,
-            );
-          } else if (
-            entry.action.type === "ocr-text" &&
-            entry.action.target === "heist-gems"
-          ) {
-            if (process.platform !== "win32") return;
-
-            const { action } = entry;
-            const pressTime = Date.now();
-            const imageData = this.poeWindow.screenshot();
-            this.ocrWorker
-              .findHeistGems({
-                width: this.poeWindow.bounds.width,
-                height: this.poeWindow.bounds.height,
-                data: imageData,
-              })
-              .then((result) => {
-                this.server.sendEventTo("last-active", {
-                  name: "MAIN->CLIENT::ocr-text",
-                  payload: {
-                    target: action.target,
-                    pressTime,
-                    ocrTime: result.elapsed,
-                    paragraphs: result.recognized.map((p) => p.text),
-                  },
-                });
-              })
-              .catch(() => {});
-          }
-        },
+        () => this.executeAction(entry),
       );
 
       if (!isOk) {
@@ -283,6 +269,120 @@ export class Shortcuts {
 
   private unregister() {
     globalShortcut.unregisterAll();
+  }
+
+  private executeAction(entry: ShortcutAction) {
+    if (this.logKeys) {
+      this.logger.write(`debug [Shortcuts] Action type: ${entry.action.type}`);
+    }
+
+    const skipGenericKeyRelease =
+      process.platform === "linux" && entry.action.type === "copy-item";
+
+    if (!skipGenericKeyRelease && entry.keepModKeys) {
+      const nonModKey = entry.shortcut
+        .split(" + ")
+        .filter((key) => !isModKey(key))[0];
+      uIOhook.keyToggle(UiohookKey[nonModKey as UiohookKeyT], "up");
+    } else if (!skipGenericKeyRelease) {
+      entry.shortcut
+        .split(" + ")
+        .reverse()
+        .forEach((key) => {
+          uIOhook.keyToggle(UiohookKey[key as UiohookKeyT], "up");
+        });
+    }
+
+    if (entry.action.type === "toggle-overlay") {
+      this.areaTracker.removeListeners();
+      this.overlay.toggleActiveState();
+    } else if (entry.action.type === "paste-in-chat") {
+      typeInChat(entry.action.text, entry.action.send, this.clipboard);
+    } else if (entry.action.type === "trigger-event") {
+      this.server.sendEventTo("broadcast", {
+        name: "MAIN->CLIENT::widget-action",
+        payload: { target: entry.action.target },
+      });
+    } else if (entry.action.type === "stash-search") {
+      stashSearch(entry.action.text, this.clipboard, this.overlay);
+    } else if (entry.action.type === "copy-item") {
+      const { action } = entry;
+      const pressPosition = this.getCopyItemPressPosition();
+
+      this.clipboard
+        .readItemText()
+        .then((clipboard) => {
+          this.areaTracker.removeListeners();
+          this.server.sendEventTo("last-active", {
+            name: "MAIN->CLIENT::item-text",
+            payload: {
+              target: action.target,
+              clipboard,
+              position: pressPosition,
+              focusOverlay: Boolean(action.focusOverlay),
+            },
+          });
+          if (action.focusOverlay && this.overlay.wasUsedRecently) {
+            this.overlay.assertOverlayActive();
+          }
+        })
+        .catch(() => {});
+
+      pressKeysToCopyItemText(
+        entry.keepModKeys
+          ? entry.shortcut.split(" + ").filter((key) => isModKey(key))
+          : undefined,
+        this.gameConfig.showModsKey,
+      );
+    } else if (
+      entry.action.type === "ocr-text" &&
+      entry.action.target === "heist-gems"
+    ) {
+      if (process.platform !== "win32") return;
+
+      const { action } = entry;
+      const pressTime = Date.now();
+      const imageData = this.poeWindow.screenshot();
+      this.ocrWorker
+        .findHeistGems({
+          width: this.poeWindow.bounds.width,
+          height: this.poeWindow.bounds.height,
+          data: imageData,
+        })
+        .then((result) => {
+          this.server.sendEventTo("last-active", {
+            name: "MAIN->CLIENT::ocr-text",
+            payload: {
+              target: action.target,
+              pressTime,
+              ocrTime: result.elapsed,
+              paragraphs: result.recognized.map((p) => p.text),
+            },
+          });
+        })
+        .catch(() => {});
+    }
+  }
+
+  private getCopyItemPressPosition() {
+    const rawCursor = screen.getCursorScreenPoint();
+    const cursor =
+      process.platform === "linux"
+        ? screen.dipToScreenPoint(rawCursor)
+        : rawCursor;
+
+    if (process.platform !== "linux" || !this.lastMousePosition) {
+      return cursor;
+    }
+
+    const dx = Math.abs(this.lastMousePosition.x - cursor.x);
+    const dy = Math.abs(this.lastMousePosition.y - cursor.y);
+    if (dx > 8 || dy > 8) {
+      this.logger.write(
+        `debug [Shortcuts] Linux cursor mismatch: uiohook=(${this.lastMousePosition.x},${this.lastMousePosition.y}) electron=(${cursor.x},${cursor.y})`,
+      );
+    }
+    return { ...this.lastMousePosition };
   }
 }
 

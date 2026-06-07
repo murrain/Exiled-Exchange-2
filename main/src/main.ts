@@ -21,6 +21,20 @@ if (!app.requestSingleInstanceLock()) {
   app.exit();
 }
 
+if (
+  process.platform === "linux" &&
+  process.env.WAYLAND_DISPLAY &&
+  !process.argv.includes("--ozone-platform=x11")
+) {
+  console.log(
+    "[exiled-exchange-2] Running under Wayland, relaunching with --ozone-platform=x11",
+  );
+  app.relaunch({
+    args: [...process.argv.slice(1), "--ozone-platform=x11"],
+  });
+  app.exit();
+}
+
 if (process.platform !== "darwin") {
   app.disableHardwareAcceleration();
 }

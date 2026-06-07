@@ -135,9 +135,11 @@ export default defineComponent({
       gameFocused.value = state.game;
 
       if (active.value === false) {
-        for (const w of widgets.value) {
-          if (w.wmFlags.includes("hide-on-blur")) {
-            hide(w.wmId);
+        if (!state.preserveWidgets) {
+          for (const w of widgets.value) {
+            if (w.wmFlags.includes("hide-on-blur")) {
+              hide(w.wmId);
+            }
           }
         }
       } else {

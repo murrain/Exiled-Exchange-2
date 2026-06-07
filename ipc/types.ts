@@ -107,6 +107,7 @@ type IpcFocusChange = Event<
     game: boolean;
     overlay: boolean;
     usingHotkey: boolean;
+    preserveWidgets?: boolean;
   }
 >;
 
@@ -212,6 +213,16 @@ type IpcUserAction = Event<
   | {
       action: "stash-search";
       text: string;
+    }
+  | {
+      action: "debug-log";
+      text: string;
+    }
+  | {
+      action: "activate-overlay";
+    }
+  | {
+      action: "price-check-clicked";
     }
 >;
 

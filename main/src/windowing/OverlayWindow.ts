@@ -12,8 +12,11 @@ export class OverlayWindow {
   public isInteractable = false;
   public wasUsedRecently = true;
   private window?: BrowserWindow;
-  private overlayKey: string = "Shift + Space";
+  get electronWindow() { return this.window; }
+  public overlayKey: string = "Shift + Space";
   private isOverlayKeyUsed = false;
+  private allowInputEnterReactivation = false;
+  private onDeactivateCallbacks: Array<() => void> = [];
 
   constructor(
     private server: ServerEvents,
@@ -26,6 +29,9 @@ export class OverlayWindow {
     );
     this.poeWindow.on("active-change", this.handlePoeWindowActiveChange);
     this.poeWindow.onAttach(this.handleOverlayAttached);
+    if (process.platform === "linux") {
+      OverlayController.events.on("input-enter", this.handleInputEnter);
+    }
 
     this.server.onEventAnyClient("CLIENT->MAIN::used-recently", (e) => {
       this.wasUsedRecently = e.isOverlay;
@@ -86,23 +92,76 @@ export class OverlayWindow {
 
   assertOverlayActive = () => {
     if (!this.isInteractable) {
+      this.logger.write("debug [Overlay] assertOverlayActive: activating");
       this.isInteractable = true;
       OverlayController.activateOverlay();
       this.poeWindow.isActive = false;
     }
   };
 
-  assertGameActive = () => {
+  refreshOverlayActive = () => {
     if (this.isInteractable) {
-      this.isInteractable = false;
-      OverlayController.focusTarget();
-      this.poeWindow.isActive = true;
+      this.logger.write("debug [Overlay] refreshOverlayActive: reactivating");
+      OverlayController.activateOverlay();
+      this.poeWindow.isActive = false;
+      return;
     }
+
+    this.assertOverlayActive();
   };
 
-  toggleActiveState = () => {
-    this.isOverlayKeyUsed = true;
+  returnFocusToGame = () => {
+    if (!this.isInteractable) return;
+
+    this.logger.write(
+      "debug [Overlay] returnFocusToGame: deactivating (preserving session)",
+    );
+    this.isInteractable = false;
+    this.armInputEnterReactivation("mouse-leave");
+    OverlayController.focusTarget();
+    this.poeWindow.isActive = true;
+  };
+
+  assertGameActive = () => {
+    if (!this.isInteractable && !this.allowInputEnterReactivation) return;
+
     if (this.isInteractable) {
+      this.logger.write("debug [Overlay] assertGameActive: deactivating");
+    } else {
+      this.logger.write(
+        "debug [Overlay] assertGameActive: dismissing preserved widget session",
+      );
+    }
+
+    this.isInteractable = false;
+    if (this.allowInputEnterReactivation) {
+      this.disarmInputEnterReactivation("explicit dismiss");
+    }
+    if (process.platform === "linux") {
+      this.server.sendEventTo("broadcast", {
+        name: "MAIN->OVERLAY::hide-exclusive-widget",
+        payload: undefined,
+      });
+    }
+    for (const cb of this.onDeactivateCallbacks) cb();
+    OverlayController.focusTarget();
+    this.poeWindow.isActive = true;
+  };
+
+  private lastToggleTime = 0;
+
+  toggleActiveState = () => {
+    // Guard against double-toggle: on Linux, both globalShortcut and uiohook
+    // fire for the same keypress. Without this, globalShortcut activates the
+    // overlay, then uiohook sees isInteractable=true and toggles it back off.
+    const now = Date.now();
+    if (now - this.lastToggleTime < 100) return;
+    this.lastToggleTime = now;
+
+    this.isOverlayKeyUsed = true;
+    if (process.platform === "linux" && this.allowInputEnterReactivation) {
+      this.assertGameActive();
+    } else if (this.isInteractable) {
       this.assertGameActive();
     } else {
       this.assertOverlayActive();
@@ -114,11 +173,38 @@ export class OverlayWindow {
     this.poeWindow.attach(this.window, windowTitle);
   }
 
+  get isAwaitingInputEnterReactivation() {
+    return this.allowInputEnterReactivation;
+  }
+
+  onDeactivate(cb: () => void) {
+    this.onDeactivateCallbacks.push(cb);
+  }
+
+  private armInputEnterReactivation(reason: string) {
+    if (this.allowInputEnterReactivation) return;
+    this.allowInputEnterReactivation = true;
+    this.logger.write(
+      `debug [Overlay] input-enter reactivation: armed (${reason})`,
+    );
+  }
+
+  private disarmInputEnterReactivation(reason: string) {
+    if (!this.allowInputEnterReactivation) return;
+    this.allowInputEnterReactivation = false;
+    this.logger.write(
+      `debug [Overlay] input-enter reactivation: disarmed (${reason})`,
+    );
+  }
+
   private handleExtraCommands = (
     event: Electron.Event,
     input: Electron.Input,
   ) => {
     if (input.type !== "keyDown") return;
+    // On Linux, uiohook handles overlay dismissal (Escape, overlay key)
+    // instead of before-input-event, which requires electronWindow.focus().
+    if (process.platform === "linux") return;
 
     let { code, control: ctrlKey, shift: shiftKey, alt: altKey } = input;
 
@@ -150,6 +236,21 @@ export class OverlayWindow {
     }
   };
 
+  handleInputEnter = () => {
+    if (!this.allowInputEnterReactivation || this.isInteractable) {
+      this.logger.write(
+        `debug [Overlay] input-enter: ignored (armed=${this.allowInputEnterReactivation} isInteractable=${this.isInteractable})`,
+      );
+      return;
+    }
+
+    this.logger.write(
+      "debug [Overlay] input-enter: reactivating overlay, disarming on return",
+    );
+    this.disarmInputEnterReactivation("cursor return");
+    this.assertOverlayActive();
+  };
+
   private handleOverlayAttached = (hasAccess?: boolean) => {
     if (hasAccess === false) {
       this.logger.write(
@@ -172,6 +273,29 @@ export class OverlayWindow {
   };
 
   private handlePoeWindowActiveChange = (isActive: boolean) => {
+    if (process.platform === "linux") {
+      if (isActive && this.isInteractable) {
+        this.logger.write(
+          "debug [Overlay] game focus event while interactable: keeping overlay active on Linux",
+        );
+      }
+      const preserveWidgets = isActive && this.allowInputEnterReactivation;
+      this.logger.write(
+        `debug [Overlay] focus-change: game=${isActive} overlay=${this.isInteractable} preserveWidgets=${preserveWidgets}`,
+      );
+      this.server.sendEventTo("broadcast", {
+        name: "MAIN->OVERLAY::focus-change",
+        payload: {
+          game: isActive,
+          overlay: this.isInteractable,
+          usingHotkey: this.isOverlayKeyUsed,
+          preserveWidgets,
+        },
+      });
+      this.isOverlayKeyUsed = false;
+      return;
+    }
+
     if (isActive && this.isInteractable) {
       this.isInteractable = false;
     }

@@ -26,7 +26,8 @@ if (!process.env.VITE_DEV_SERVER_URL) {
     )
       return;
 
-    const filePath = req.url === "/" ? "/index.html" : req.url!;
+    const rawUrl = req.url!.split("?")[0];
+    const filePath = rawUrl === "/" ? "/index.html" : rawUrl;
     switch (path.extname(filePath)) {
       case ".html":
         res.setHeader("content-type", "text/html");
