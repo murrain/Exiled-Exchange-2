@@ -23,16 +23,6 @@ export class GameWindow extends EventEmitter {
     return this._isActive;
   }
 
-  /**
-   * Suppress the next game-blur event. Call this immediately before an
-   * operation that steals focus from the game (e.g. showing a companion
-   * window), so the resulting blur is not propagated to subscribers.
-   * The flag is consumed by the next blur or cleared by a focus event.
-   */
-  suppressNextBlur() {
-    this._suppressNextBlur = true;
-  }
-
   set isActive(active: boolean) {
     if (active) {
       if (this._blurTimer) {
@@ -62,6 +52,10 @@ export class GameWindow extends EventEmitter {
         this.emit("active-change", false);
       }
     }
+  }
+
+  suppressNextBlur() {
+    this._suppressNextBlur = true;
   }
 
   get uiSidebarWidth() {
