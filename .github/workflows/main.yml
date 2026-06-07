@@ -36,7 +36,7 @@ jobs:
     - uses: actions/setup-node@v6
       with:
         node-version: 24
-    - run: sudo apt-get install -y libxcb-dev libxcb-composite0-dev libxcb-randr0-dev libxtst-dev libxkbcommon-dev
+    - run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev libxtst-dev libxkbcommon-dev
     - uses: actions/download-artifact@v4
       with:
         name: renderer-dist
