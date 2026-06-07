@@ -31,6 +31,8 @@ jobs:
   package:
     needs: renderer
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
     - uses: actions/checkout@v6
     - uses: actions/setup-node@v6
@@ -47,7 +49,17 @@ jobs:
       working-directory: ./main
     - run: npm run build
       working-directory: ./main
-    - run: npx electron-builder build --linux AppImage --publish always
+    - run: npx electron-builder build --linux AppImage --publish never
       working-directory: ./main
+    - name: Upload AppImage to release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION=$(node -p "require('./main/package.json').version")
+        TAG="v${VERSION}-linux-test"
+        gh release delete "$TAG" --repo ${{ github.repository }} --yes 2>/dev/null || true
+        gh release create "$TAG" ./main/dist/*.AppImage \
+          --repo ${{ github.repository }} \
+          --title "Linux Test Build v${VERSION}" \
+          --notes "Automated Linux test build with patched electron-overlay-window" \
+          --prerelease
