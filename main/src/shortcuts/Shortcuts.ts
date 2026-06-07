@@ -252,7 +252,9 @@ export class Shortcuts {
 
       const isOk = globalShortcut.register(
         shortcutToElectron(entry.shortcut),
-        () => this.executeAction(entry),
+        () => {
+          this.executeAction(entry);
+        },
       );
 
       if (!isOk) {

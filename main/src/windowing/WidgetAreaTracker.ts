@@ -18,7 +18,9 @@ export class WidgetAreaTracker {
     private overlay: OverlayWindow,
     private logger: Logger,
   ) {
-    this.overlay.onDeactivate(() => this.removeListeners());
+    this.overlay.onDeactivate(() => {
+      this.removeListeners();
+    });
 
     this.server.onEventAnyClient("OVERLAY->MAIN::track-area", (opts) => {
       this.holdKey = opts.holdKey;
