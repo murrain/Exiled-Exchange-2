@@ -45,10 +45,7 @@ jobs:
       working-directory: ./main
     - run: npm run build
       working-directory: ./main
-    - run: npx electron-builder build --linux AppImage --publish never
+    - run: npx electron-builder build --linux AppImage --publish always
       working-directory: ./main
-    - uses: actions/upload-artifact@v4
-      with:
-        name: linux-appimage
-        path: ./main/dist/*.AppImage
-        retention-days: 30
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
